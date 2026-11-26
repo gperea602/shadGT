@@ -3,6 +3,7 @@
 
 #pragma once
 #include "video_core/renderer_vulkan/shader_fix_scan_cache.h"
+#include "video_core/renderer_vulkan/preparation_hold_policy.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -621,6 +622,8 @@ private:
     static std::filesystem::path WarmComputeDir();
     void WarmComputePipelines(std::stop_token stop);
     std::atomic<bool> warm_compute_pending{}; // FEAT-SGT-903: recipe worker lifetime
+    std::atomic<u64> warm_compute_processed{}; // FEAT-SGT-904
+    PreparationStallWatch preparation_stall_watch;
     std::jthread warm_compute_thread;
     u32 pipelines_at_driver_save{};
     std::chrono::steady_clock::time_point driver_cache_saved_at{};

@@ -1007,14 +1007,14 @@ bool PrecompileHoldsGame() {
 // FEAT-GTS-470: when the hold was taken, for the splash's length in the log.
 static std::atomic<s64> g_precompile_hold_since_ms{};
 
-static void ReleasePrecompileHold() {
+static void ReleasePrecompileHold(const char* reason = "done") {
     if (g_precompile_hold.exchange(false)) {
         Common::GuestClock::ReleaseHold();
         const s64 since = g_precompile_hold_since_ms.load();
         const s64 now = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        LOG_WARNING(Render_Vulkan, "PERF-102: precompile done after {:.1f} s; the game continues",
-                    since ? double(now - since) / 1000.0 : 0.0);
+        LOG_WARNING(Render_Vulkan, "PERF-102: precompile {} after {:.1f} s; the game continues",
+                    reason, since ? double(now - since) / 1000.0 : 0.0);
     }
 }
 
@@ -1980,6 +1980,7 @@ void PipelineCache::WarmComputePipelines(std::stop_token stop) {
     for (const auto& file : files) {
         if (stop.stop_requested()) return;
         if (ComputePipeline::WarmFromRecipe(instance, profile, *pipeline_cache, file, stop)) ++warmed;
+        ++warm_compute_processed; // FEAT-SGT-904: attempts, not successes
     }
     LOG_INFO(Render_Vulkan, "PERF-GT7-037: warmed {} of {} compute recipes", warmed, files.size());
 }
@@ -7672,6 +7673,17 @@ static std::chrono::seconds PrecompileHoldLimit() {
     return limit;
 }
 
+// FEAT-SGT-904: inspired by the failure-aware preparation state in SpartanPort.
+// This bounds inactivity only; even hours of continued progress never hit a total deadline.
+static std::chrono::seconds PreparationStallLimit() {
+    static const auto limit = [] {
+        const char* env = std::getenv("SHADGT_PRECOMPILE_STALL_S");
+        const u32 asked = env ? PretranslateCrew::ParseWorkerLimit(env) : 0;
+        return std::chrono::seconds{asked ? std::clamp(asked, 60u, 86400u) : 900u};
+    }();
+    return limit;
+}
+
 void PipelineCache::IdlePrewarm(bool splash) {
     if (!prewarm_enabled) {
         ReleasePrecompileHold();
@@ -7715,13 +7727,27 @@ void PipelineCache::IdlePrewarm(bool splash) {
     // counters describe processed work (including skips), not universal shader coverage.
     static const auto first_call = std::chrono::steady_clock::now();
     if (PrecompileHoldsGame()) {
+        const auto now = std::chrono::steady_clock::now();
+        const bool wait_all = PrecompileWaitAll();
+        const bool reader_done = prewarm_reader_done.load();
+        const bool translation_pending = g_pretranslate_pending.load();
+        const bool compute_pending = warm_compute_pending.load();
+        const bool stalled = wait_all && preparation_stall_watch.Observe(
+            {g_precompile_done.load(), prewarm_read.load(), g_pretranslate_done.load(),
+             g_pretranslate_total.load(), warm_compute_processed.load(),
+             reader_done, translation_pending, compute_pending},
+            now, PreparationStallLimit());
         const auto decision = DecidePreparationHold(
-            PrecompileWaitAll(), prewarm_reader_done && !GetPrecompileProgress().active,
-            g_pretranslate_pending.load(), warm_compute_pending.load(),
-            std::chrono::steady_clock::now() - first_call > PrecompileHoldLimit());
-        if (decision == PreparationHoldDecision::Deadline) {
+            wait_all, reader_done && !GetPrecompileProgress().active,
+            translation_pending, compute_pending, now - first_call > PrecompileHoldLimit(), stalled);
+        if (decision == PreparationHoldDecision::Stalled) {
+            LOG_WARNING(Render_Vulkan, "FEAT-SGT-904: no observed startup progress for {} s; "
+                        "releasing hold as incomplete, not cancelling driver calls",
+                        PreparationStallLimit().count());
+            ReleasePrecompileHold("stalled (incomplete)");
+        } else if (decision == PreparationHoldDecision::Deadline) {
             LOG_WARNING(Render_Vulkan, "FEAT-SGT-903: startup deadline reached; preparation may be incomplete");
-            ReleasePrecompileHold();
+            ReleasePrecompileHold("deadline (incomplete)");
         } else if (decision == PreparationHoldDecision::Drained) {
             if (PrecompileWaitAll()) {
                 LOG_WARNING(Render_Vulkan, "FEAT-SGT-903: startup queues drained; see skip/failure logs for coverage");

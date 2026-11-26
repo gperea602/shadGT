@@ -103,6 +103,31 @@ TEST(PreparationHoldPolicy, WaitAllIgnoresDeadlineUntilQueuesDrain) {
     EXPECT_EQ(DecidePreparationHold(true, true, false, false, true), D::Drained);
 }
 
+TEST(PreparationHoldPolicy, StallDoesNotOverrideDrainedOrLegacy) {
+    using Vulkan::DecidePreparationHold;
+    using D = Vulkan::PreparationHoldDecision;
+    EXPECT_EQ(DecidePreparationHold(true, false, true, true, true, true), D::Stalled);
+    EXPECT_EQ(DecidePreparationHold(true, true, false, false, true, true), D::Drained);
+    EXPECT_EQ(DecidePreparationHold(false, false, true, true, false, true), D::Wait);
+    EXPECT_EQ(DecidePreparationHold(false, false, true, true, true, true), D::Deadline);
+}
+
+TEST(PreparationHoldPolicy, InactivityWatchRenewsAcrossHoursOfProgress) {
+    Vulkan::PreparationStallWatch watch;
+    const auto start = Vulkan::PreparationStallWatch::Clock::time_point{};
+    Vulkan::PreparationStallWatch::Progress progress{};
+    EXPECT_FALSE(watch.Observe(progress, start, 15min));
+    EXPECT_FALSE(watch.Observe(progress, start + 14min, 15min));
+    EXPECT_TRUE(watch.Observe(progress, start + 15min, 15min));
+    ++progress[4];
+    EXPECT_FALSE(watch.Observe(progress, start + 16min, 15min));
+    for (int i = 1; i <= 20; ++i) {
+        ++progress[2];
+        EXPECT_FALSE(watch.Observe(progress, start + 16min + i * 14min, 15min));
+    }
+    EXPECT_TRUE(watch.Observe(progress, start + 16min + 20 * 14min + 15min, 15min));
+}
+
 TEST(PretranslateCrew, WidthsComeFromTheCpuWithBounds) {
     struct {
         u32 logical, splash, play;
