@@ -97,6 +97,31 @@ TEST(PretranslateCrew, WidthsComeFromTheCpuWithBounds) {
     }
 }
 
+TEST(PretranslateCrew, ExperimentalWorkerLimitIsParsedStrictly) {
+    EXPECT_EQ(PretranslateCrew::ParseWorkerLimit(""), 0u);
+    EXPECT_EQ(PretranslateCrew::ParseWorkerLimit("0"), 0u);
+    EXPECT_EQ(PretranslateCrew::ParseWorkerLimit("12"), 12u);
+    for (const auto* invalid : {"-1", "+2", "4x", " 4", "4 ", "4294967296"}) {
+        EXPECT_EQ(PretranslateCrew::ParseWorkerLimit(invalid), 0u);
+    }
+}
+
+TEST(PretranslateCrew, ExperimentalWorkerLimitRespectsBothPhases) {
+    for (const u32 logical : LogicalCpus) {
+        for (const u32 limit : {0u, 1u, 2u, 8u, 16u, 100u}) {
+            PretranslateCrew splash{logical, true, true, 64, limit};
+            PretranslateCrew play{logical, false, true, 64, limit};
+            EXPECT_EQ(splash.Threads(), limit ? std::min(limit, PretranslateCrew::SplashWidth(logical))
+                                             : PretranslateCrew::SplashWidth(logical));
+            EXPECT_EQ(play.Threads(), limit ? std::min(limit, PretranslateCrew::PlayWidth(logical))
+                                           : PretranslateCrew::PlayWidth(logical));
+            u32 kept = 0;
+            splash.Watch([] { return false; }, [&](u32 width) { kept = width; });
+            EXPECT_EQ(kept, play.Threads());
+        }
+    }
+}
+
 TEST(PretranslateCrew, ReleaseLowersAtOnceThenKeepsThePlayWidth) {
     for (const u32 logical : LogicalCpus) {
         SCOPED_TRACE(logical);

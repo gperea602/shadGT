@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <charconv>
+#include <string_view>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -28,9 +30,23 @@ public:
         return std::clamp(logical / 4, 1u, 4u);
     }
 
+    // FEAT-SGT-901: zero, unset or malformed means automatic. Oversized valid requests
+    // are bounded by the detected CPU width, not by an assumed processor topology.
+    static u32 ParseWorkerLimit(std::string_view value) {
+        if (value.empty()) return 0;
+        u32 limit = 0;
+        const auto result = std::from_chars(value.data(), value.data() + value.size(), limit);
+        return result.ec == std::errc{} && result.ptr == value.data() + value.size() ? limit : 0;
+    }
+
+    static constexpr u32 LimitWidth(u32 width, u32 limit) {
+        return limit == 0 ? width : std::min(width, limit);
+    }
+
     /// `held`: the game is held now. `follows_hold` false: the crew stays as it started.
-    PretranslateCrew(u32 logical, bool held, bool follows_hold, size_t records_)
-        : threads{held ? SplashWidth(logical) : PlayWidth(logical)}, play{PlayWidth(logical)},
+    PretranslateCrew(u32 logical, bool held, bool follows_hold, size_t records_, u32 limit = 0)
+        : threads{LimitWidth(held ? SplashWidth(logical) : PlayWidth(logical), limit)},
+          play{LimitWidth(PlayWidth(logical), limit)},
           follows{held && follows_hold}, records{records_}, in_play{!held}, working{threads} {}
 
     u32 Threads() const {

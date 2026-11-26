@@ -2246,8 +2246,11 @@ void PipelineCache::PretranslateManifest(std::stop_token stop) {
     // FEAT-GTS-469: while the splash precompile holds the game for it, every logical processor
     // translates at normal priority; during play a few low-priority threads, as before.
     // FIX-SGT-099: and from the hold's end as during play.
+    // FEAT-SGT-901: optional user cap for manifest pre-translation only.
+    const char* worker_limit = std::getenv("SHADGT_PRETRANSLATE_WORKERS");
+    const u32 limit = PretranslateCrew::ParseWorkerLimit(worker_limit ? worker_limit : "");
     PretranslateCrew crew{std::thread::hardware_concurrency(), PrecompileHoldsGame(),
-                          PretranslateFollowsHold(), files.size()};
+                          PretranslateFollowsHold(), files.size(), limit};
     const auto work = [&] {
         PretranslateCrew::Worker worker{
             crew,
@@ -2262,7 +2265,8 @@ void PipelineCache::PretranslateManifest(std::stop_token stop) {
         while (!stop.stop_requested()) {
             const auto taken = worker.TakeRecord();
             if (!taken) break;
-            ++g_pretranslate_done; // FEAT-GTS-469: counted as taken up
+            // FEAT-SGT-901: count processed records, including skips/failures, not dequeues.
+            SCOPE_EXIT { ++g_pretranslate_done; };
             ManifestRecord r;
             if (!ReadManifestRecord(files[*taken], r) || !ManifestRecordUsable(r)) {
                 ++failed;
@@ -2361,10 +2365,11 @@ void PipelineCache::PretranslateManifest(std::stop_token stop) {
     const u32 count = crew.Threads();
     std::vector<std::thread> threads;
     for (u32 t = 0; t < count; ++t) {
-        threads.emplace_back([&work] {
+        threads.emplace_back([&work, &failed] {
             try {
                 work();
             } catch (const std::exception& e) {
+                ++failed; // FEAT-SGT-901: an interrupted worker is not a successful translation.
                 LOG_WARNING(Render_Vulkan, "PERF-GT7-117: pre-translation stopped: {}", e.what());
             }
         });
@@ -2372,7 +2377,7 @@ void PipelineCache::PretranslateManifest(std::stop_token stop) {
     crew.Watch(PrecompileHoldsGame, [&](u32 kept) {
         for (auto& thread : threads) Common::MoveThreadToBackground(thread);
         LOG_WARNING(Render_Vulkan,
-                    "FIX-SGT-099: the game is no longer held with {} of {} records taken up: "
+                    "FIX-SGT-099: the game is no longer held with {} of {} records processed: "
                     "pre-translation goes on at low priority, {} of its {} threads",
                     g_pretranslate_done.load(), files.size(), kept, count);
     });
