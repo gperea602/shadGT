@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "video_core/renderer_vulkan/pretranslate_crew.h"
+#include "video_core/renderer_vulkan/preparation_hold_policy.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -84,6 +85,23 @@ struct Harness {
 };
 
 } // namespace
+
+TEST(PreparationHoldPolicy, DefaultPreservesDeadline) {
+    using Vulkan::DecidePreparationHold;
+    using D = Vulkan::PreparationHoldDecision;
+    EXPECT_EQ(DecidePreparationHold(false, false, true, true, false), D::Wait);
+    EXPECT_EQ(DecidePreparationHold(false, false, true, true, true), D::Deadline);
+    EXPECT_EQ(DecidePreparationHold(false, true, false, true, false), D::Drained);
+}
+
+TEST(PreparationHoldPolicy, WaitAllIgnoresDeadlineUntilQueuesDrain) {
+    using Vulkan::DecidePreparationHold;
+    using D = Vulkan::PreparationHoldDecision;
+    EXPECT_EQ(DecidePreparationHold(true, false, false, false, true), D::Wait);
+    EXPECT_EQ(DecidePreparationHold(true, true, true, false, true), D::Wait);
+    EXPECT_EQ(DecidePreparationHold(true, true, false, true, true), D::Wait);
+    EXPECT_EQ(DecidePreparationHold(true, true, false, false, true), D::Drained);
+}
 
 TEST(PretranslateCrew, WidthsComeFromTheCpuWithBounds) {
     struct {

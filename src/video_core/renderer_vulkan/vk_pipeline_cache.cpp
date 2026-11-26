@@ -88,6 +88,7 @@
 #include "video_core/renderer_vulkan/shader_object_cache.h"
 #include "video_core/renderer_vulkan/compiler_worker_budget.h"
 #include "video_core/renderer_vulkan/pretranslate_crew.h"
+#include "video_core/renderer_vulkan/preparation_hold_policy.h"
 #include "video_core/renderer_vulkan/translation_priority.h"
 #include "video_core/renderer_vulkan/translation_retry.h"
 #include "video_core/renderer_vulkan/single_sample_barycentric.h"
@@ -1017,7 +1018,17 @@ static void ReleasePrecompileHold() {
     }
 }
 
-// FIX-SGT-099: the hold can end before the pre-translation does (15 minutes at most), and its
+// FEAT-SGT-903: explicitly opt into waiting for the startup queues, not a fixed deadline.
+// This is not a coverage or success guarantee; only existing records can be processed.
+static bool PrecompileWaitAll() {
+    static const bool on = [] {
+        const char* env = std::getenv("SHADGT_PRECOMPILE_WAIT_ALL");
+        return env && std::strcmp(env, "1") == 0;
+    }();
+    return on;
+}
+
+// FIX-SGT-099: the hold can end before the pre-translation does (15 minutes at most by default), and its
 // workers kept every logical CPU at normal priority while the game played. They follow the hold
 // now. SHADGT_PRETRANSLATE_FOLLOW_HOLD=0: as they started, as before.
 static bool PretranslateFollowsHold() {
@@ -2918,13 +2929,16 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         SingleSampleBarycentricRequested())); // FIX-419-GTS (FIX-GT7-061)
     CreateDriverCache();
     if (WarmComputeOn()) {
+        warm_compute_pending = true; // FEAT-SGT-903: set before launch to avoid a false idle state.
         try {
             warm_compute_thread = std::jthread([this](std::stop_token stop) {
+                SCOPE_EXIT { warm_compute_pending = false; };
                 try { WarmComputePipelines(stop); }
                 catch (const std::exception& e) { LOG_WARNING(Render_Vulkan, "Warm compute stopped: {}", e.what()); }
                 catch (...) { LOG_WARNING(Render_Vulkan, "Warm compute stopped unexpectedly"); }
             });
         } catch (const std::exception& e) {
+            warm_compute_pending = false;
             LOG_WARNING(Render_Vulkan, "Warm compute unavailable: {}", e.what());
         }
     }
@@ -7641,8 +7655,8 @@ void PipelineCache::PrewarmRead(std::stop_token stop) {
                 "missing stages or files)",
                 keys.size(), skipped);
     prewarm_reader_done = true;
-    if (keys.empty()) {
-        ReleasePrecompileHold(); // nothing stored yet (first start)
+    if (keys.empty() && !PrecompileWaitAll()) {
+        ReleasePrecompileHold(); // default: nothing stored yet (first start)
     }
 }
 
@@ -7697,12 +7711,23 @@ void PipelineCache::IdlePrewarm(bool splash) {
             install_us_at = install_us;
         }
     }
-    // PERF-102: released once every stored pipeline is built (or after PrecompileHoldLimit at most).
+    // FEAT-SGT-903: explicit wait-all also waits for recorded compute recipes. The
+    // counters describe processed work (including skips), not universal shader coverage.
     static const auto first_call = std::chrono::steady_clock::now();
-    if (PrecompileHoldsGame() &&
-        ((prewarm_reader_done && !GetPrecompileProgress().active) ||
-         std::chrono::steady_clock::now() - first_call > PrecompileHoldLimit())) {
-        ReleasePrecompileHold();
+    if (PrecompileHoldsGame()) {
+        const auto decision = DecidePreparationHold(
+            PrecompileWaitAll(), prewarm_reader_done && !GetPrecompileProgress().active,
+            g_pretranslate_pending.load(), warm_compute_pending.load(),
+            std::chrono::steady_clock::now() - first_call > PrecompileHoldLimit());
+        if (decision == PreparationHoldDecision::Deadline) {
+            LOG_WARNING(Render_Vulkan, "FEAT-SGT-903: startup deadline reached; preparation may be incomplete");
+            ReleasePrecompileHold();
+        } else if (decision == PreparationHoldDecision::Drained) {
+            if (PrecompileWaitAll()) {
+                LOG_WARNING(Render_Vulkan, "FEAT-SGT-903: startup queues drained; see skip/failure logs for coverage");
+            }
+            ReleasePrecompileHold();
+        }
     }
     if (build_workers) {
         build_workers->SetBoost(splash);
