@@ -1,6 +1,8 @@
 name: Renderer PR compile check
 
 on:
+  push:
+    branches: [feat/shader-preparation-nvidia-4070]
   pull_request:
     branches: [ryty-gpu]
   workflow_dispatch:
