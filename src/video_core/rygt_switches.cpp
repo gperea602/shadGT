@@ -36,6 +36,8 @@ RYGT_SWITCH_EXPORT extern const char* const RyGT_SwitchDescriptions[];
 RYGT_SWITCH_EXPORT extern const std::size_t RyGT_SwitchDescriptionCount;
 
 RYGT_SWITCH_EXPORT const char* const RyGT_SwitchDescriptions[] = {
+    // Giulio graphics (GFX-001)
+    "RYGTSW1|SHADGT_GIULIO_ANISO|choice|Giulio Graphics|0|0 = original; 4 = minimum 4x; 8 = minimum 8x; 16 = minimum 16x|Raises existing anisotropic non-depth sampler quality up to the GPU limit. Restart required; experimental.",
     // Shader objects & caches
     "RYGTSW1|SHADGT_COMPILE_PACK|flag|Shader objects & caches|off|1 = on (needs shader objects and SHADGT_SO_CACHE on)|At start, compiles in the background the compile-pack recipes missing from this driver's cache, e.g. after a driver update. Uses all cores.",
     "RYGTSW1|SHADGT_DEPTH_CLIP_CONTROL|flag|Shader objects & caches|on (VK_EXT_depth_clip_control)|0 = the vertex shader converts -1..1 depth (uses a separate shader store)|0 converts -1..1 depth in the vertex shader instead of the driver; breaks car tessellation (FIX-GTS-443, experimental).",
