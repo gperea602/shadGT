@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+#include <string_view>
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/texture_cache/sampler.h"
@@ -14,8 +16,23 @@ Sampler::Sampler(const Vulkan::Instance& instance, const AmdGpu::Sampler& sample
     const bool anisotropy_enable = instance.IsAnisotropicFilteringSupported() &&
                                    (AmdGpu::IsAnisoFilter(sampler.xy_mag_filter) ||
                                     AmdGpu::IsAnisoFilter(sampler.xy_min_filter));
+    // GFX-001: opt-in quality floor, only on guest-requested anisotropic,
+    // non-depth samplers. Preserve nearest sampling and comparison semantics.
+    // The setting is fixed for the lifetime of the process/sampler cache.
+    static const float graphics_aniso_floor = [] {
+        const char* value = std::getenv("SHADGT_GIULIO_ANISO");
+        if (!value) return 1.0f;
+        const std::string_view option{value};
+        if (option == "4") return 4.0f;
+        if (option == "8") return 8.0f;
+        if (option == "16") return 16.0f;
+        return 1.0f;
+    }();
+    const float guest_anisotropy = sampler.MaxAniso();
+    const float requested_anisotropy =
+        !is_depth ? std::max(guest_anisotropy, graphics_aniso_floor) : guest_anisotropy;
     const float max_anisotropy =
-        anisotropy_enable ? std::clamp(sampler.MaxAniso(), 1.0f, instance.MaxSamplerAnisotropy())
+        anisotropy_enable ? std::clamp(requested_anisotropy, 1.0f, instance.MaxSamplerAnisotropy())
                           : 1.0f;
     auto border_color = LiverpoolToVK::BorderColor(sampler.border_color_type);
     if (border_color == vk::BorderColor::eFloatCustomEXT &&
